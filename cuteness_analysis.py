@@ -54,7 +54,7 @@ class FacialLandmarkDetector:
 
     def detect_landmarks(self, image_path):
         """
-        Detect faces and approximate landmarks in an image.
+        Detect faces and approximate landmarks in an image using improved detection.
 
         Args:
             image_path (str): Path to the image file
@@ -72,14 +72,8 @@ class FacialLandmarkDetector:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
             if self.face_cascade:
-                # Use Haar cascade if available
-                faces = self.face_cascade.detectMultiScale(
-                    gray,
-                    scaleFactor=1.1,
-                    minNeighbors=5,
-                    minSize=(30, 30),
-                    flags=cv2.CASCADE_SCALE_IMAGE,
-                )
+                # Try multiple detection strategies with different parameters
+                faces = self._detect_faces_robust(gray)
 
                 if len(faces) > 0:
                     # Get the largest face
@@ -97,22 +91,83 @@ class FacialLandmarkDetector:
                         "face_rect": (x, y, w, h),
                         "image_shape": image.shape,
                     }
-            else:
-                # Fallback: assume the entire image is a face
-                h, w = image.shape[:2]
-                landmarks = self._create_synthetic_landmarks(0, 0, w, h, image.shape)
 
-                return {
-                    "success": True,
-                    "landmarks": landmarks,
-                    "face_rect": (0, 0, w, h),
-                    "image_shape": image.shape,
-                }
+            # Fallback: assume the entire image is a face
+            h, w = image.shape[:2]
+            landmarks = self._create_synthetic_landmarks(0, 0, w, h, image.shape)
 
-            return {"success": False, "error": "No faces detected"}
+            return {
+                "success": True,
+                "landmarks": landmarks,
+                "face_rect": (0, 0, w, h),
+                "image_shape": image.shape,
+            }
 
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def _detect_faces_robust(self, gray_image):
+        """
+        Robust face detection using multiple parameter sets.
+
+        Args:
+            gray_image: Grayscale image for detection
+
+        Returns:
+            list: List of detected face rectangles
+        """
+        faces = []
+
+        # Strategy 1: Standard detection (most common)
+        faces = self.face_cascade.detectMultiScale(
+            gray_image,
+            scaleFactor=1.05,
+            minNeighbors=3,
+            minSize=(30, 30),
+            flags=cv2.CASCADE_SCALE_IMAGE,
+        )
+
+        if len(faces) > 0:
+            return faces
+
+        # Strategy 2: More sensitive detection
+        faces = self.face_cascade.detectMultiScale(
+            gray_image,
+            scaleFactor=1.1,
+            minNeighbors=2,
+            minSize=(20, 20),
+            flags=cv2.CASCADE_SCALE_IMAGE,
+        )
+
+        if len(faces) > 0:
+            return faces
+
+        # Strategy 3: Very sensitive detection for difficult images
+        faces = self.face_cascade.detectMultiScale(
+            gray_image,
+            scaleFactor=1.15,
+            minNeighbors=1,
+            minSize=(15, 15),
+            flags=cv2.CASCADE_SCALE_IMAGE,
+        )
+
+        if len(faces) > 0:
+            return faces
+
+        # Strategy 4: Try with image preprocessing
+        # Enhance contrast and reduce noise
+        enhanced = cv2.equalizeHist(gray_image)
+        blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
+
+        faces = self.face_cascade.detectMultiScale(
+            blurred,
+            scaleFactor=1.1,
+            minNeighbors=2,
+            minSize=(25, 25),
+            flags=cv2.CASCADE_SCALE_IMAGE,
+        )
+
+        return faces
 
     def _create_synthetic_landmarks(self, x, y, w, h, image_shape):
         """
@@ -525,13 +580,17 @@ class CutenessAnalyzer:
         print("Loading and processing images...")
 
         # Process jpg or png cat images
-        cat_images = glob.glob(os.path.join(self.data_dir, "cats", "*.jpg")) + \
-            glob.glob(os.path.join(self.data_dir, "cats", "*.png"))
+        cat_images = glob.glob(
+            os.path.join(self.data_dir, "cats", "*.jpg")
+        ) + glob.glob(os.path.join(self.data_dir, "cats", "*.png"))
 
         random.shuffle(cat_images)
         cat_images = cat_images[:max_images_per_species]
 
         print(f"Processing {len(cat_images)} cat images...")
+        cat_success = 0
+        cat_total = len(cat_images)
+
         for img_path in tqdm(cat_images, desc="Cats"):
             result = self.landmark_detector.detect_landmarks(img_path)
             if result["success"]:
@@ -540,15 +599,20 @@ class CutenessAnalyzer:
                 )
                 if features is not None:
                     self.cat_features.append(features)
+                    cat_success += 1
 
         # Process jpg or png dog images
-        dog_images = glob.glob(os.path.join(self.data_dir, "dogs", "*.jpg")) + \
-            glob.glob(os.path.join(self.data_dir, "dogs", "*.png"))
+        dog_images = glob.glob(
+            os.path.join(self.data_dir, "dogs", "*.jpg")
+        ) + glob.glob(os.path.join(self.data_dir, "dogs", "*.png"))
 
         random.shuffle(dog_images)
         dog_images = dog_images[:max_images_per_species]
 
         print(f"Processing {len(dog_images)} dog images...")
+        dog_success = 0
+        dog_total = len(dog_images)
+
         for img_path in tqdm(dog_images, desc="Dogs"):
             result = self.landmark_detector.detect_landmarks(img_path)
             if result["success"]:
@@ -557,10 +621,110 @@ class CutenessAnalyzer:
                 )
                 if features is not None:
                     self.dog_features.append(features)
+                    dog_success += 1
 
         print("\nSuccessfully processed:")
-        print(f"  Cats: {len(self.cat_features)} images")
-        print(f"  Dogs: {len(self.dog_features)} images")
+        print(
+            f"  Cats: {cat_success}/{cat_total} images ({cat_success / cat_total * 100:.1f}% success rate)"
+        )
+        print(
+            f"  Dogs: {dog_success}/{dog_total} images ({dog_success / dog_total * 100:.1f}% success rate)"
+        )
+
+        # Provide recommendations for improvement
+        if cat_success < cat_total * 0.5 or dog_success < dog_total * 0.5:
+            print("\n💡 Tips to improve detection rate:")
+            print("   - Use --balanced flag for equal sample sizes")
+            print(
+                "   - Increase max_images_per_species to get more successful detections"
+            )
+            print("   - Check image quality and face orientation in your dataset")
+
+    def load_and_process_images_balanced(self, max_images_per_species=100):
+        """
+        Load and process images from both species with balanced sampling.
+        Ensures equal numbers of successful features for both species.
+
+        Args:
+            max_images_per_species (int): Target number of successful features per species
+        """
+        print("Loading and processing images with balanced sampling...")
+
+        # Process images until we get the target number of successful features
+        target_features = max_images_per_species
+
+        # Process cat images
+        cat_images = glob.glob(
+            os.path.join(self.data_dir, "cats", "*.jpg")
+        ) + glob.glob(os.path.join(self.data_dir, "cats", "*.png"))
+        random.shuffle(cat_images)
+
+        print(f"Processing cat images until {target_features} successful features...")
+        cat_processed = 0
+        for img_path in tqdm(cat_images, desc="Cats (balanced)"):
+            if len(self.cat_features) >= target_features:
+                break
+            cat_processed += 1
+            result = self.landmark_detector.detect_landmarks(img_path)
+            if result["success"]:
+                features = self.feature_extractor.extract_features(
+                    result["landmarks"], result["image_shape"]
+                )
+                if features is not None:
+                    self.cat_features.append(features)
+
+        # Process dog images
+        dog_images = glob.glob(
+            os.path.join(self.data_dir, "dogs", "*.jpg")
+        ) + glob.glob(os.path.join(self.data_dir, "dogs", "*.png"))
+        random.shuffle(dog_images)
+
+        print(f"Processing dog images until {target_features} successful features...")
+        dog_processed = 0
+        for img_path in tqdm(dog_images, desc="Dogs (balanced)"):
+            if len(self.dog_features) >= target_features:
+                break
+            dog_processed += 1
+            result = self.landmark_detector.detect_landmarks(img_path)
+            if result["success"]:
+                features = self.feature_extractor.extract_features(
+                    result["landmarks"], result["image_shape"]
+                )
+                if features is not None:
+                    self.dog_features.append(features)
+
+        print("\nSuccessfully processed (balanced):")
+        print(
+            f"  Cats: {len(self.cat_features)}/{target_features} features (processed {cat_processed} images)"
+        )
+        print(
+            f"  Dogs: {len(self.dog_features)}/{target_features} features (processed {dog_processed} images)"
+        )
+
+        # Calculate success rates
+        cat_success_rate = (
+            len(self.cat_features) / cat_processed if cat_processed > 0 else 0
+        )
+        dog_success_rate = (
+            len(self.dog_features) / dog_processed if dog_processed > 0 else 0
+        )
+
+        print(f"  Cat detection success rate: {cat_success_rate * 100:.1f}%")
+        print(f"  Dog detection success rate: {dog_success_rate * 100:.1f}%")
+
+        # Ensure we have enough data for analysis
+        if len(self.cat_features) < 10 or len(self.dog_features) < 10:
+            print("⚠️  Warning: Low sample sizes may affect statistical reliability")
+            print(
+                "   Consider increasing max_images_per_species or improving face detection"
+            )
+
+        # Check if we achieved balanced sampling
+        if len(self.cat_features) == len(self.dog_features):
+            print("✅ Balanced sampling achieved: Equal n values for both species")
+        else:
+            print("⚠️  Warning: Could not achieve balanced sampling")
+            print(f"   Cats: {len(self.cat_features)}, Dogs: {len(self.dog_features)}")
 
     def train_infant_axis(self):
         """Train the model to learn the Infant Axis."""
@@ -697,8 +861,24 @@ class CutenessAnalyzer:
 
         # 1. OCI Distribution Comparison
         ax1 = axes[0, 0]
-        ax1.hist(self.cat_oci_scores, alpha=0.7, label="Cats", bins=20, color="orange")
-        ax1.hist(self.dog_oci_scores, alpha=0.7, label="Dogs", bins=20, color="blue")
+        ax1.hist(
+            self.cat_oci_scores,
+            alpha=0.7,
+            label="Cats",
+            bins=20,
+            color="orange",
+            density=True,
+            linewidth=1,
+        )
+        ax1.hist(
+            self.dog_oci_scores,
+            alpha=0.7,
+            label="Dogs",
+            bins=20,
+            color="blue",
+            density=True,
+            linewidth=1,
+        )
         ax1.set_xlabel("Objective Cuteness Index (OCI)")
         ax1.set_ylabel("Frequency")
         ax1.set_title("OCI Distribution: Cats vs Dogs")
@@ -715,14 +895,9 @@ class CutenessAnalyzer:
 
         # 3. Violin Plot
         ax3 = axes[1, 0]
-        violin_data = []
-        violin_labels = []
-        for score in self.cat_oci_scores:
-            violin_data.append(score)
-            violin_labels.append("Cats")
-        for score in self.dog_oci_scores:
-            violin_data.append(score)
-            violin_labels.append("Dogs")
+        violin_data = [self.cat_oci_scores, self.dog_oci_scores]
+
+        ax3.violinplot(violin_data)
 
         ax3.set_xticks([1, 2])
         ax3.set_xticklabels(["Cats", "Dogs"])
@@ -853,19 +1028,27 @@ class CutenessAnalyzer:
         else:
             return "large"
 
-    def run_complete_analysis(self, max_images_per_species=100, create_viz=True):
+    def run_complete_analysis(
+        self, max_images_per_species=100, create_viz=True, balanced=False
+    ):
         """
         Run the complete cuteness analysis pipeline.
 
         Args:
             max_images_per_species (int): Maximum images to process per species
             create_viz (bool): Whether to create visualizations
+            balanced (bool): Whether to use balanced sampling for equal n values
         """
         print("🎯 STARTING OBJECTIVE CUTENESS INDEX ANALYSIS")
+        if balanced:
+            print("⚖️  Using BALANCED SAMPLING for equal sample sizes")
         print("=" * 60)
 
         # Step 1: Load and process images
-        self.load_and_process_images(max_images_per_species)
+        if balanced:
+            self.load_and_process_images_balanced(max_images_per_species)
+        else:
+            self.load_and_process_images(max_images_per_species)
 
         # Step 2: Train the Infant Axis model
         self.train_infant_axis()
@@ -884,7 +1067,40 @@ class CutenessAnalyzer:
         self.save_results()
 
         print("\n🎉 ANALYSIS COMPLETE!")
+        if balanced:
+            print("⚖️  Balanced sampling ensured equal n values for both species")
         print("Check the 'results' directory for detailed outputs.")
+
+    def show_detection_statistics(self):
+        """Display detailed detection statistics."""
+        print("\n" + "=" * 50)
+        print("FACE DETECTION STATISTICS")
+        print("=" * 50)
+
+        if len(self.cat_features) > 0 and len(self.dog_features) > 0:
+            print("📊 SAMPLE SIZES:")
+            print(f"  Cats: n = {len(self.cat_features)}")
+            print(f"  Dogs: n = {len(self.dog_features)}")
+
+            if len(self.cat_features) == len(self.dog_features):
+                print("✅ BALANCED: Equal sample sizes achieved")
+            else:
+                print("⚠️  UNBALANCED: Different sample sizes")
+                print(
+                    f"   Difference: |{len(self.cat_features)} - {len(self.dog_features)}| = {abs(len(self.cat_features) - len(self.dog_features))}"
+                )
+
+            print("\n🔍 STATISTICAL IMPLICATIONS:")
+            if len(self.cat_features) == len(self.dog_features):
+                print("   - Balanced design for fair comparison")
+                print("   - Equal statistical power for both groups")
+                print("   - Reduced risk of bias in results")
+            else:
+                print("   - Unbalanced design may affect statistical power")
+                print("   - Consider using --balanced flag for equal samples")
+                print("   - Results may be biased toward the larger group")
+        else:
+            print("❌ No features extracted - check face detection settings")
 
 
 def main(args):
@@ -895,6 +1111,13 @@ def main(args):
     print("craniofacial juvenility using geometric features from facial landmarks.")
     print()
 
+    if args.balanced:
+        print("⚖️  BALANCED MODE: Will ensure equal sample sizes for both species")
+        print(
+            "   This may process more images to achieve the target number of features."
+        )
+        print()
+
     # Initialize analyzer
     analyzer = CutenessAnalyzer()
 
@@ -902,7 +1125,11 @@ def main(args):
     analyzer.run_complete_analysis(
         max_images_per_species=args.max_images,
         create_viz=args.create_viz,
+        balanced=args.balanced,
     )
+
+    # Show detection statistics
+    analyzer.show_detection_statistics()
 
     print("\n📚 For more information, see docs/FINAL_SUMMARY.md")
     print(
@@ -911,8 +1138,41 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the cuteness analysis")
-    parser.add_argument("--max_images", type=int, default=50, help="Maximum images to process per species")
-    parser.add_argument("--create_viz", action="store_true", default=True, help="Whether to create visualizations")
+    parser = argparse.ArgumentParser(
+        description="Run the objective cuteness index analysis for cats vs dogs",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Standard analysis with 50 images per species
+  python cuteness_analysis.py
+  
+  # Balanced analysis with 100 images per species
+  python cuteness_analysis.py --balanced --max_images 100
+  
+  # Analysis without visualizations
+  python cuteness_analysis.py --create_viz False
+  
+  # Large balanced analysis
+  python cuteness_analysis.py --balanced --max_images 500
+        """,
+    )
+    parser.add_argument(
+        "--max_images",
+        type=int,
+        default=50,
+        help="Maximum images to process per species (default: 50)",
+    )
+    parser.add_argument(
+        "--create_viz",
+        action="store_true",
+        default=True,
+        help="Whether to create visualizations (default: True)",
+    )
+    parser.add_argument(
+        "--balanced",
+        action="store_true",
+        default=False,
+        help="Use balanced sampling to ensure equal n values for both species (default: False)",
+    )
     args = parser.parse_args()
     main(args)
